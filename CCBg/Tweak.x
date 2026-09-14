@@ -901,6 +901,10 @@ static UIImage *ccbgBlurredImage(UIImage *image, CGFloat blurRadius) {
 
 // MARK: - 背景管理器
 
+// 前向声明：模块背景清理注册函数（定义在 @end 之后）
+@class CustomCCBgManager;
+static void ccbgRegisterModuleBgCleanup(UIView *moduleView, CCBgType type, CustomCCBgManager *mgr);
+
 @interface CustomCCBgManager : NSObject
 
 // 全屏背景属性
@@ -1001,6 +1005,12 @@ static UIImage *ccbgBlurredImage(UIImage *image, CGFloat blurRadius) {
             CFSTR("dylv.Deepliquid.ccbg.reload"),
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
+        
+        // 【内存保护】监听系统内存警告，内存不足时释放缓存
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleMemoryWarning:)
+                                                     name:UIApplicationDidReceiveMemoryWarningNotification
+                                                   object:nil];
         _connectModuleBackgrounds = [NSMutableDictionary dictionary];
         _mediaModuleBackgrounds = [NSMutableDictionary dictionary];
         _isControlCenterVisible = NO;
@@ -1011,6 +1021,51 @@ static UIImage *ccbgBlurredImage(UIImage *image, CGFloat blurRadius) {
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+// 【内存保护】处理系统内存警告
+// 内存不足时释放所有缓存的图片和视频资源，避免被 Jetsam 杀死
+- (void)handleMemoryWarning:(NSNotification *)note {
+    @autoreleasepool {
+        ccbg_log(@"Received memory warning, releasing all caches");
+        
+        // 使所有缓存失效并释放图片
+        self.fullscreenCacheValid = NO;
+        self.cachedFullscreenImage = nil;
+        self.cachedFullscreenBlurredImage = nil;
+        
+        self.connectCacheValid = NO;
+        self.cachedConnectImage = nil;
+        self.cachedConnectBlurredImage = nil;
+        
+        self.mediaCacheValid = NO;
+        self.cachedMediaImage = nil;
+        self.cachedMediaBlurredImage = nil;
+        
+        // 如果控制中心不可见，还可以释放视频播放器
+        if (!self.isControlCenterVisible) {
+            // 释放全屏视频
+            if (self.videoView) {
+                [self.videoView pause];
+                self.videoView = nil;
+            }
+            
+            // 释放所有模块视频播放器
+            for (CCBgModuleBackground *bg in self.connectModuleBackgrounds.allValues) {
+                [bg pause];
+            }
+            for (CCBgModuleBackground *bg in self.mediaModuleBackgrounds.allValues) {
+                [bg pause];
+            }
+            
+            // 释放共享视频播放器
+            if (self.sharedModuleVideoPlayer) {
+                [self.sharedModuleVideoPlayer pause];
+                self.sharedModuleVideoPlayer = nil;
+            }
+            self.sharedModuleLooper = nil;
+        }
+    }
 }
 
 - (void)reloadPreferences {
@@ -2027,6 +2082,8 @@ static const NSTimeInterval kCCBgDeferredReleaseDelay = 10.0;
         bg = [[CCBgModuleBackground alloc] init];
         [superview.layer insertSublayer:bg.containerLayer below:moduleView.layer];
         bgDict[key] = bg;
+        // 注册自动清理：视图销毁时自动释放背景资源
+        ccbgRegisterModuleBgCleanup(moduleView, type, self);
         ccbg_log(@"module bg CREATED: type=%ld platterClass=%@ frame=%@ cornerRadius=%.1f hasImage=%d hasVideo=%d",
               (long)type, NSStringFromClass([platterView class] ?: [moduleView class]),
               NSStringFromCGRect(bgFrame), cornerRadius,
@@ -2133,7 +2190,65 @@ static const NSTimeInterval kCCBgDeferredReleaseDelay = 10.0;
 
 @end
 
+// MARK: - 模块背景自动清理机制
+// 当模块视图销毁时，自动清理对应的背景资源，防止内存泄漏
+// 使用关联对象的"清理代理"模式：视图销毁时代理对象也被释放，在 dealloc 中清理资源
+
+static const void *kCCBgModuleBgCleanupKey = &kCCBgModuleBgCleanupKey;
+
+// 前向声明
+@class CustomCCBgManager;
+
+@interface CCBgModuleBgCleanupProxy : NSObject
+@property (nonatomic, assign) CCBgType bgType;
+@property (nonatomic, assign) uintptr_t viewKey;  // 视图指针值，用于查找字典中的 key
+@property (nonatomic, weak) CustomCCBgManager *manager;
+@end
+
+@implementation CCBgModuleBgCleanupProxy
+- (void)dealloc {
+    CustomCCBgManager *mgr = self.manager;
+    CCBgType type = self.bgType;
+    uintptr_t viewKey = self.viewKey;
+    if (mgr && viewKey != 0) {
+        // 异步清理，避免在 dealloc 中做太多工作
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @autoreleasepool {
+                NSMutableDictionary *bgDict = (type == kCCBgTypeConnect) ?
+                    mgr.connectModuleBackgrounds : mgr.mediaModuleBackgrounds;
+                NSNumber *key = [NSNumber numberWithUnsignedLong:viewKey];
+                CCBgModuleBackground *bg = bgDict[key];
+                if (bg) {
+                    [bg cleanup];
+                    [bgDict removeObjectForKey:key];
+                }
+            }
+        });
+    }
+}
+@end
+
+// 为模块视图注册自动清理代理
+static void ccbgRegisterModuleBgCleanup(UIView *moduleView, CCBgType type, CustomCCBgManager *mgr) {
+    if (!moduleView || !mgr) return;
+    
+    // 检查是否已经注册过
+    CCBgModuleBgCleanupProxy *existing = objc_getAssociatedObject(moduleView, kCCBgModuleBgCleanupKey);
+    if (existing) return;
+    
+    CCBgModuleBgCleanupProxy *proxy = [[CCBgModuleBgCleanupProxy alloc] init];
+    proxy.bgType = type;
+    proxy.viewKey = (uintptr_t)moduleView;
+    proxy.manager = mgr;
+    objc_setAssociatedObject(moduleView, kCCBgModuleBgCleanupKey, proxy,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 // MARK: - MTMaterialView 管理辅助
+
+// MTMaterialView 级别缓存：避免每次 setHidden: 都重新遍历视图层级
+// 用 associated object 缓存结果，视图销毁时自动清理
+static const void *kCCBgInsideManagedModuleCacheKey = &kCCBgInsideManagedModuleCacheKey;
 
 // 检查 MTMaterialView 是否位于连接模块或播放控制模块内部
 // 用于 hook MTMaterialView 的 layoutSubviews / setHidden: 持续隐藏系统模糊
@@ -2153,38 +2268,87 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
     if (!mgr.hostView) return NO;
     if (materialView.window != mgr.hostView.window) return NO;
 
+    // 【优化】视图级缓存：同一个 MTMaterialView 只做一次完整检测
+    // 避免 setHidden: 被反复调用时重复遍历视图层级
+    NSNumber *cached = objc_getAssociatedObject(materialView, kCCBgInsideManagedModuleCacheKey);
+    if (cached) {
+        return [cached boolValue];
+    }
+
+    BOOL result = NO;
+
     // 【修复连接模块模糊】优先检查是否在已追踪的管理模块内
     // handleModuleView: 和 handleExpandedModuleViewController: 已成功检测的模块视图
     // 会注册到 sCCBgManagedModules，这里通过祖先链查找匹配
     // 这比类名匹配更可靠，因为不依赖 iOS 版本特定的类名/关键词
-    if (ccbgIsDescendantOfManagedModule(materialView)) return YES;
-
-    // 向上遍历视图层级，查找模块容器
-    UIView *v = materialView;
-    NSInteger depth = 0;
-    while (v && depth < 20) {
-        NSString *cls = NSStringFromClass([v class]);
-        // 找到模块容器视图
-        if ([cls containsString:@"ContentModuleContainer"] ||
-            [cls containsString:@"ModuleContainerView"]) {
-            // 用完整的模块检测逻辑判断是否为连接/媒体模块
-            if (mgr.connectEnabled && ccbgIsConnectModule(v)) return YES;
-            if (mgr.mediaEnabled && ccbgIsMediaModule(v)) return YES;
-            return NO; // 是模块容器但不是连接/媒体模块
+    if (ccbgIsDescendantOfManagedModule(materialView)) {
+        result = YES;
+    } else {
+        // 向上遍历视图层级，查找模块容器
+        UIView *v = materialView;
+        NSInteger depth = 0;
+        while (v && depth < 20) {
+            NSString *cls = NSStringFromClass([v class]);
+            // 找到模块容器视图
+            if ([cls containsString:@"ContentModuleContainer"] ||
+                [cls containsString:@"ModuleContainerView"]) {
+                // 用完整的模块检测逻辑判断是否为连接/媒体模块
+                if (mgr.connectEnabled && ccbgIsConnectModule(v)) {
+                    result = YES;
+                    break;
+                }
+                if (mgr.mediaEnabled && ccbgIsMediaModule(v)) {
+                    result = YES;
+                    break;
+                }
+                // 是模块容器但不是连接/媒体模块
+                break;
+            }
+            v = v.superview;
+            depth++;
         }
-        v = v.superview;
-        depth++;
     }
-    return NO;
+
+    // 缓存结果（仅在控制中心可见时缓存，关闭后缓存会失效）
+    // 注意：缓存用 OBJC_ASSOCIATION_ASSIGN 类型的 NSNumber，视图销毁时自动释放
+    objc_setAssociatedObject(materialView, kCCBgInsideManagedModuleCacheKey,
+                             @(result), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    return result;
+}
+
+// 清空所有 MTMaterialView 的 inside 缓存（控制中心关闭时调用）
+static void ccbgClearInsideModuleCache(void) {
+    // 缓存是绑定到每个视图的，视图销毁时自动清理
+    // 这里不需要手动清理，下次控制中心打开时会重新缓存
+    // （不同的控制中心会话可能有不同的视图实例）
 }
 
 // MARK: - Hooks
+
+// 全局安全模式标志
+static BOOL sCCBgSafeMode = NO;
+
+// 启动时间戳（用于启动宽限期）
+static NSTimeInterval sCCBgLaunchTime = 0;
+
+// 启动宽限期（秒）：在此期间 MTMaterialView hook 完全不工作
+// 避免在 SpringBoard 启动关键路径上消耗资源
+static const NSTimeInterval kCCBgStartupGracePeriod = 15.0;
+
+// 检查是否在启动宽限期内
+static BOOL ccbgIsInStartupGracePeriod(void) {
+    if (sCCBgLaunchTime <= 0) return YES; // 还没记录启动时间，视为在宽限期内
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    return (now - sCCBgLaunchTime) < kCCBgStartupGracePeriod;
+}
 
 // 主 hook: 控制中心 overlay controller
 %hook CCUIModularControlCenterOverlayViewController
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    if (sCCBgSafeMode) return;
     ccbg_log(@"CC overlay viewWillAppear");
     ccbgLogExpandedClasses();
     [[CustomCCBgManager sharedInstance] setControlCenterVisible:YES];
@@ -2194,6 +2358,7 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    if (sCCBgSafeMode) return;
     ccbg_log(@"CC overlay viewDidAppear");
     [[CustomCCBgManager sharedInstance] setControlCenterVisible:YES];
 }
@@ -2203,23 +2368,28 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 - (void)viewWillDisappear:(BOOL)animated {
     // 先隐藏背景，再执行 orig（orig 会触发关闭动画）
     // 用 CATransaction 确保 layer 属性立即生效，不被系统动画捕获
-    ccbg_log(@"CC overlay viewWillDisappear → instant remove");
-    [CATransaction begin];
-    [CATransaction setAnimationDuration:0];
-    [CATransaction setDisableActions:YES];
-    [[CustomCCBgManager sharedInstance] setControlCenterVisible:NO];
-    [CATransaction commit];
+    if (!sCCBgSafeMode) {
+        ccbg_log(@"CC overlay viewWillDisappear → instant remove");
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0];
+        [CATransaction setDisableActions:YES];
+        [[CustomCCBgManager sharedInstance] setControlCenterVisible:NO];
+        [CATransaction commit];
+    }
     %orig;
 }
 
 // 兜底：viewDidDisappear 确保已关闭
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
+    if (sCCBgSafeMode) return;
     [[CustomCCBgManager sharedInstance] setControlCenterVisible:NO];
 }
 
 - (void)dealloc {
-    [[CustomCCBgManager sharedInstance] detach];
+    if (!sCCBgSafeMode) {
+        [[CustomCCBgManager sharedInstance] detach];
+    }
     %orig;
 }
 
@@ -2230,6 +2400,7 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 
 - (void)layoutSubviews {
     %orig;
+    if (sCCBgSafeMode) return;
     CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
     UIView *host = [(UIView *)self superview];
     if (host) {
@@ -2252,6 +2423,8 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 // 模块视图加载到窗口时处理
 - (void)viewDidLayoutSubviews {
     %orig;
+    if (sCCBgSafeMode) return;
+    if (ccbgIsInStartupGracePeriod()) return;
 
     CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
     UIView *view = [(UIViewController *)self view];
@@ -2283,6 +2456,7 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    if (sCCBgSafeMode) return;
 
     CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
     UIView *view = [(UIViewController *)self view];
@@ -2308,6 +2482,7 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     %orig;
+    if (sCCBgSafeMode) return;
     if (!newWindow) {
         CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
         if (mgr.isControlCenterVisible) {
@@ -2342,6 +2517,19 @@ static volatile BOOL sCCBgInMaterialHook = NO;
 
 // 拦截系统尝试显示 MTMaterialView 的操作
 - (void)setHidden:(BOOL)hidden {
+    // 【安全模式】安全模式下直接放行，不做任何处理
+    if (sCCBgSafeMode) {
+        %orig;
+        return;
+    }
+
+    // 【启动宽限期】SpringBoard 启动后 15 秒内完全不拦截
+    // 避免在系统启动关键路径上消耗资源
+    if (ccbgIsInStartupGracePeriod()) {
+        %orig;
+        return;
+    }
+
     // 重入保护
     if (sCCBgInMaterialHook) {
         %orig;
@@ -2387,6 +2575,12 @@ static volatile BOOL sCCBgInMaterialHook = NO;
 - (void)didMoveToWindow {
     %orig;
 
+    // 【安全模式】安全模式下直接返回
+    if (sCCBgSafeMode) return;
+
+    // 【启动宽限期】启动后 15 秒内完全不处理
+    if (ccbgIsInStartupGracePeriod()) return;
+
     // 重入保护
     if (sCCBgInMaterialHook) return;
 
@@ -2408,18 +2602,142 @@ static volatile BOOL sCCBgInMaterialHook = NO;
 
 %end
 
+// MARK: - 安全启动保护机制
+// 防止插件出错导致系统无法进入桌面
+
+// 紧急禁用文件：存在此文件则插件完全不加载任何 hook
+// 用户可在安全模式/SSH 下创建此文件来禁用插件：
+//   touch /var/mobile/Library/Preferences/dylv.Deepliquid.ccbg/.disabled
+static NSString * const kCCBgEmergencyDisableFile = @"/var/mobile/Library/Preferences/dylv.Deepliquid.ccbg/.disabled";
+
+// 启动记录文件：用于检测 boot loop
+static NSString * const kCCBgBootLogFile = @"/var/mobile/Library/Preferences/dylv.Deepliquid.ccbg/.bootlog";
+
+// 最大连续快速启动次数（超过则进入安全模式）
+static const NSInteger kCCBgMaxConsecutiveFastBoots = 3;
+// 快速启动阈值（秒）：两次启动间隔小于此值视为 boot loop
+static const NSTimeInterval kCCBgFastBootThreshold = 120.0; // 2 分钟
+
+// 检查是否存在紧急禁用文件
+static BOOL ccbgIsEmergencyDisabled(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    return [fm fileExistsAtPath:kCCBgEmergencyDisableFile];
+}
+
+// 读取启动日志，判断是否处于 boot loop
+static BOOL ccbgIsInBootLoop(void) {
+    @autoreleasepool {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        
+        // 确保目录存在
+        NSString *dir = [kCCBgBootLogFile stringByDeletingLastPathComponent];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+        
+        // 读取旧的启动时间戳列表
+        NSMutableArray<NSNumber *> *bootTimes = [NSMutableArray array];
+        NSData *data = [NSData dataWithContentsOfFile:kCCBgBootLogFile];
+        if (data && data.length > 0) {
+            NSArray *loaded = [NSKeyedUnarchiver unarchiveObjectWithData:data];
+            if ([loaded isKindOfClass:[NSArray class]]) {
+                for (id obj in loaded) {
+                    if ([obj isKindOfClass:[NSNumber class]]) {
+                        [bootTimes addObject:obj];
+                    }
+                }
+            }
+        }
+        
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        
+        // 检查最近几次启动是否间隔太短（boot loop 特征）
+        NSInteger consecutiveFastBoots = 0;
+        NSTimeInterval lastTime = now;
+        for (NSNumber *t in bootTimes) {
+            NSTimeInterval interval = lastTime - [t doubleValue];
+            if (interval > 0 && interval < kCCBgFastBootThreshold) {
+                consecutiveFastBoots++;
+            } else {
+                break;
+            }
+            lastTime = [t doubleValue];
+        }
+        
+        // 记录本次启动时间
+        [bootTimes insertObject:@(now) atIndex:0];
+        // 只保留最近 10 条记录
+        if (bootTimes.count > 10) {
+            [bootTimes removeObjectsInRange:NSMakeRange(10, bootTimes.count - 10)];
+        }
+        
+        // 写回日志
+        NSData *newData = [NSKeyedArchiver archivedDataWithRootObject:bootTimes];
+        [newData writeToFile:kCCBgBootLogFile atomically:YES];
+        
+        // 如果连续快速启动次数超过阈值，判定为 boot loop
+        return consecutiveFastBoots >= kCCBgMaxConsecutiveFastBoots;
+    }
+}
+
+// 标记启动成功（进入桌面后调用，清除 boot loop 计数）
+static void ccbgMarkBootSuccessful(void) {
+    @autoreleasepool {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *dir = [kCCBgBootLogFile stringByDeletingLastPathComponent];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+        
+        // 清空启动日志，表示启动成功
+        NSData *emptyData = [NSKeyedArchiver archivedDataWithRootObject:@[]];
+        [emptyData writeToFile:kCCBgBootLogFile atomically:YES];
+    }
+}
+
 // MARK: - 构造函数
 
 %ctor {
-    // 【修复卡死】仅 SpringBoard 进程中初始化 hooks
-    // 虽然 plist 过滤器应该限制加载范围，但作为额外保护
+    // 仅 SpringBoard 进程中初始化
     if (!ccbgIsSpringBoard()) return;
 
-    // 初始化所有 hook
+    // 记录启动时间戳（用于启动宽限期）
+    sCCBgLaunchTime = [[NSDate date] timeIntervalSince1970];
+
+    // 【安全机制 1】检查紧急禁用文件
+    if (ccbgIsEmergencyDisabled()) {
+        // 完全不初始化任何 hook，插件等于被禁用
+        // 用户删除 .disabled 文件后 respring 即可恢复
+        return;
+    }
+
+    // 【安全机制 2】检测 boot loop
+    if (ccbgIsInBootLoop()) {
+        // 检测到 boot loop，进入安全模式
+        // 仍然初始化 hooks，但所有功能都被禁用
+        sCCBgSafeMode = YES;
+        
+        // 创建一个标记文件，让用户知道发生了什么
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *safemodeFile = @"/var/mobile/Library/Preferences/dylv.Deepliquid.ccbg/.safemode";
+        [fm createFileAtPath:safemodeFile contents:nil attributes:nil];
+        
+        // 初始化 hooks（但功能全部被禁用）
+        %init;
+        return;
+    }
+
+    // 正常启动：初始化所有 hook
     %init;
 
-    // 确保 CustomCCBgManager 单例延迟初始化
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [CustomCCBgManager sharedInstance];
+    // 延迟初始化 CustomCCBgManager（等 SpringBoard 启动完成后）
+    // 避免在启动关键路径上消耗资源
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            [CustomCCBgManager sharedInstance];
+            
+            // 延迟 10 秒后标记启动成功（如果 10 秒内没 respring 就算成功）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                ccbgMarkBootSuccessful();
+            });
+        }
     });
 }
