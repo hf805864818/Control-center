@@ -2329,47 +2329,91 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 // 比 ccbgScheduleMaterialBlurClamp 的延迟方案更可靠
 // 注意：MTMaterialView 是私有类，编译器不知道其继承链
 // 需要将 self 强转为 UIView * 才能访问 hidden / layer 等属性
+
+// 【关键修复】防止布局死循环的重入保护
+// layoutSubviews 中隐藏视图 → 触发 setNeedsLayout → 再次 layoutSubviews → 无限循环 → 手机卡死
+// 用静态标志阻止重入，并延迟视图修改到下一个 runloop
+static volatile BOOL sCCBgInMaterialHook = NO;
+
 %hook MTMaterialView
 
 // 系统布局完成后立即检查并隐藏
 - (void)layoutSubviews {
     %orig;
+
+    // 重入保护：如果已经在处理中，直接返回，避免死循环
+    if (sCCBgInMaterialHook) return;
+
+    // 快速检查：功能未启用或控制中心不可见时，不做任何检查
+    CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
+    if (!(mgr.connectEnabled || mgr.mediaEnabled)) return;
+    if (!mgr.isControlCenterVisible) return;
+
     UIView *selfView = (UIView *)self;
-    if (ccbgIsInsideManagedModule(selfView)) {
-        selfView.hidden = YES;
-        selfView.layer.opacity = 0.0f;
-        selfView.layer.hidden = YES;
-        // 【修复问题2&3】同时隐藏同级的液态玻璃
-        ccbgHideGlassSiblingsOf(selfView);
-    }
+    if (!ccbgIsInsideManagedModule(selfView)) return;
+
+    // 设置重入标志，防止隐藏操作触发的 layoutSubviews 再次进入
+    sCCBgInMaterialHook = YES;
+    // 直接操作 layer 层级，不触发 setHidden: 的 hook（避免额外布局）
+    selfView.layer.opacity = 0.0f;
+    selfView.layer.hidden = YES;
+    // 用 %orig 设置 hidden=YES，绕过我们的 setHidden: hook
+    %orig(YES);
+    // 隐藏同级的液态玻璃（遍历但不修改布局）
+    ccbgHideGlassSiblingsOf(selfView);
+    sCCBgInMaterialHook = NO;
 }
 
 // 拦截系统尝试显示 MTMaterialView 的操作
 - (void)setHidden:(BOOL)hidden {
+    // 重入保护
+    if (sCCBgInMaterialHook) {
+        %orig;
+        return;
+    }
+
     UIView *selfView = (UIView *)self;
     // 如果系统试图显示（hidden=NO），且该 MTMaterialView 在管理模块内，强制保持隐藏
-    if (!hidden && ccbgIsInsideManagedModule(selfView)) {
-        // 调用原始实现设置 hidden=YES，绕过我们的 hook 避免递归
-        %orig(YES);
-        selfView.layer.opacity = 0.0f;
-        selfView.layer.hidden = YES;
-        // 【修复问题2&3】同时隐藏同级的液态玻璃
-        ccbgHideGlassSiblingsOf(selfView);
-        return;
+    if (!hidden) {
+        CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
+        if ((mgr.connectEnabled || mgr.mediaEnabled) &&
+            mgr.isControlCenterVisible &&
+            ccbgIsInsideManagedModule(selfView)) {
+            // 调用原始实现设置 hidden=YES，绕过我们的 hook 避免递归
+            sCCBgInMaterialHook = YES;
+            %orig(YES);
+            selfView.layer.opacity = 0.0f;
+            selfView.layer.hidden = YES;
+            ccbgHideGlassSiblingsOf(selfView);
+            sCCBgInMaterialHook = NO;
+            return;
+        }
     }
     %orig;
 }
 
 // 拦截系统通过 alpha 属性显示 MTMaterialView 的操作
 - (void)setAlpha:(CGFloat)alpha {
-    UIView *selfView = (UIView *)self;
-    if (alpha > 0.01 && ccbgIsInsideManagedModule(selfView)) {
-        %orig(0.0f);
-        selfView.layer.opacity = 0.0f;
-        selfView.layer.hidden = YES;
-        // 【修复问题2&3】同时隐藏同级的液态玻璃
-        ccbgHideGlassSiblingsOf(selfView);
+    // 重入保护
+    if (sCCBgInMaterialHook) {
+        %orig;
         return;
+    }
+
+    UIView *selfView = (UIView *)self;
+    if (alpha > 0.01) {
+        CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
+        if ((mgr.connectEnabled || mgr.mediaEnabled) &&
+            mgr.isControlCenterVisible &&
+            ccbgIsInsideManagedModule(selfView)) {
+            sCCBgInMaterialHook = YES;
+            %orig(0.0f);
+            selfView.layer.opacity = 0.0f;
+            selfView.layer.hidden = YES;
+            ccbgHideGlassSiblingsOf(selfView);
+            sCCBgInMaterialHook = NO;
+            return;
+        }
     }
     %orig;
 }
@@ -2377,14 +2421,24 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 // MTMaterialView 被添加到窗口时检查
 - (void)didMoveToWindow {
     %orig;
+
+    // 重入保护
+    if (sCCBgInMaterialHook) return;
+
     UIView *selfView = (UIView *)self;
-    if (ccbgIsInsideManagedModule(selfView)) {
-        selfView.hidden = YES;
-        selfView.layer.opacity = 0.0f;
-        selfView.layer.hidden = YES;
-        // 【修复问题2&3】同时隐藏同级的液态玻璃
-        ccbgHideGlassSiblingsOf(selfView);
-    }
+    if (!selfView.window) return;
+
+    CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
+    if (!((mgr.connectEnabled || mgr.mediaEnabled) &&
+          mgr.isControlCenterVisible &&
+          ccbgIsInsideManagedModule(selfView))) return;
+
+    sCCBgInMaterialHook = YES;
+    selfView.layer.opacity = 0.0f;
+    selfView.layer.hidden = YES;
+    %orig(YES);
+    ccbgHideGlassSiblingsOf(selfView);
+    sCCBgInMaterialHook = NO;
 }
 
 %end

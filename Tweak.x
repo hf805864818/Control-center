@@ -273,7 +273,9 @@ static void ccSliderStartDisplayLink(UIView *slider) {
                                                       selector:@selector(tick:)];
     objc_setAssociatedObject(link, kCCSliderDisplayLinkKey, slider, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(slider, kCCSliderDisplayLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    link.preferredFramesPerSecond = 30; // 30fps polling to save battery
+    // 【修复卡死】从 30fps 降到 10fps，大幅减少主线程负载
+    // 滑块百分比只需 ~10fps 就足够流畅显示，30fps 会叠加多个滑块时拖慢主线程
+    link.preferredFramesPerSecond = 10;
     [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
 
@@ -297,7 +299,8 @@ static void ccSliderStopDisplayLink(UIView *slider) {
     %orig;
     ccSliderUpdatePercentLabel((UIView *)self);
     if ([(UIView *)self window]) {
-        ccSliderStartDisplayLink((UIView *)self);
+        // 【修复卡死】仅在触摸时启动 DisplayLink，不在 didMoveToWindow 时持续运行
+        // layoutSubviews 已经会在每次布局时更新百分比，无需 30fps 持续轮询
     } else {
         ccSliderStopDisplayLink((UIView *)self);
     }
@@ -314,10 +317,22 @@ static void ccSliderStopDisplayLink(UIView *slider) {
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     %orig;
     ccSliderUpdateAll((UIView *)self);
+    // 【修复卡死】触摸结束后立即停止 DisplayLink，避免持续消耗 CPU
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+        if (![(UIView *)self isTracking]) {
+            ccSliderStopDisplayLink((UIView *)self);
+        }
+    });
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     %orig;
     ccSliderUpdateAll((UIView *)self);
+    // 【修复卡死】触摸取消后立即停止 DisplayLink
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+        ccSliderStopDisplayLink((UIView *)self);
+    });
 }
 - (void)dealloc {
     ccSliderStopDisplayLink((UIView *)self);
@@ -335,7 +350,7 @@ static void ccSliderStopDisplayLink(UIView *slider) {
     %orig;
     ccSliderUpdatePercentLabel((UIView *)self);
     if ([(UIView *)self window]) {
-        ccSliderStartDisplayLink((UIView *)self);
+        // 【修复卡死】同上，不在 didMoveToWindow 持续运行 DisplayLink
     } else {
         ccSliderStopDisplayLink((UIView *)self);
     }
@@ -354,6 +369,14 @@ static void ccSliderStopDisplayLink(UIView *slider) {
     ccSliderUpdateAll((UIView *)self);
     if (![(UIView *)self window]) {
         ccSliderStopDisplayLink((UIView *)self);
+    } else {
+        // 【修复卡死】延迟停止，避免持续运行
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                        dispatch_get_main_queue(), ^{
+            if (![(UIView *)self isTracking]) {
+                ccSliderStopDisplayLink((UIView *)self);
+            }
+        });
     }
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -361,6 +384,11 @@ static void ccSliderStopDisplayLink(UIView *slider) {
     ccSliderUpdateAll((UIView *)self);
     if (![(UIView *)self window]) {
         ccSliderStopDisplayLink((UIView *)self);
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                        dispatch_get_main_queue(), ^{
+            ccSliderStopDisplayLink((UIView *)self);
+        });
     }
 }
 - (void)dealloc {

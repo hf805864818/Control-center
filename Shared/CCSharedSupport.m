@@ -15,7 +15,9 @@ static dispatch_once_t sCCPrefsSetupOnce;
 // --- Preference cache ---
 
 static NSDictionary<NSString *, id> *CCCopyPreferencesDictionary(void) {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)CCPrefsDomain);
+    // 【修复 cfprefsd 崩溃】移除 CFPreferencesAppSynchronize 调用
+    // 该函数会强制同步磁盘写入，频繁调用会导致 cfprefsd 进程崩溃 (EXC_GUARD)
+    // CFPreferencesCopyMultiple 已经能读取最新缓存的值，无需强制同步
     CFDictionaryRef values = CFPreferencesCopyMultiple(NULL,
                                                        (__bridge CFStringRef)CCPrefsDomain,
                                                        kCFPreferencesCurrentUser,
