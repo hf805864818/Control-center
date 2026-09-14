@@ -2322,6 +2322,17 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 // 用静态标志阻止重入，并延迟视图修改到下一个 runloop
 static volatile BOOL sCCBgInMaterialHook = NO;
 
+// 进程检测：仅 SpringBoard 加载
+// 【修复卡死】放在 %hook 之前，确保在文件作用域
+static BOOL ccbgIsSpringBoard(void) {
+    static BOOL cached = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cached = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
+    });
+    return cached;
+}
+
 %hook MTMaterialView
 
 // 系统布局完成后立即检查并隐藏
@@ -2387,16 +2398,6 @@ static volatile BOOL sCCBgInMaterialHook = NO;
 %end
 
 // MARK: - 构造函数
-
-// 进程检测：仅 SpringBoard 加载
-static BOOL ccbgIsSpringBoard(void) {
-    static BOOL cached = NO;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cached = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
-    });
-    return cached;
-}
 
 %ctor {
     // 【修复卡死】仅 SpringBoard 进程中初始化 hooks
