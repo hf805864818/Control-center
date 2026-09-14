@@ -1,7 +1,5 @@
-#import <Preferences/PSListItemsViewController.h>
+#import <Preferences/PSListController.h>
 #import <Preferences/PSSwitchTableCell.h>
-#import <Preferences/PSSliderTableCell.h>
-#import <Preferences/PSTitleValueSwitchCell.h>
 
-@interface CCSliderRootListController : PSListItemsViewController
+@interface CCSliderRootListController : PSListController
 @end
