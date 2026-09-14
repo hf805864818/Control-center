@@ -23,6 +23,7 @@ permissions:
 
 env:
   THEOS: /opt/theos
+  THEOS_ROOTHIDE: /opt/theos-roothide
 
 jobs:
   build:
@@ -46,11 +47,14 @@ jobs:
 
       - name: 验证 Theos 安装
         run: |
-          echo "THEOS = $THEOS"
-          ls -la "$THEOS/bin/" 2>/dev/null || echo "No bin dir"
-          ls -la "$THEOS/sdks/" 2>/dev/null || echo "No SDKs found"
+          echo "标准 Theos:"
+          echo "  THEOS = $THEOS"
+          ls -la "$THEOS/sdks/" 2>/dev/null || echo "  No SDKs found"
+          echo ""
+          echo "roothide Theos:"
+          echo "  THEOS_ROOTHIDE = $THEOS_ROOTHIDE"
+          ls -la "$THEOS_ROOTHIDE/sdks/" 2>/dev/null || echo "  No SDKs found"
           which ldid 2>/dev/null || echo "ldid not found"
-          "$THEOS/bin/dpkg-deb" --version 2>/dev/null || dpkg-deb --version 2>/dev/null || echo "dpkg-deb not found"
 
       - name: 自动递增版本号
         id: version
@@ -80,8 +84,12 @@ jobs:
           echo "  编译 roothide 版本..."
           echo "=========================================="
           make clean 2>/dev/null || true
-          make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1 2>&1 || {
+          THEOS="$THEOS_ROOTHIDE" make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1 2>&1 || {
             echo "❌ roothide 编译失败"
+            echo "--- 诊断信息 ---"
+            ls -la "$THEOS_ROOTHIDE/sdks/" 2>/dev/null || echo "No SDKs"
+            ls -la "$THEOS_ROOTHIDE/makefiles/mod/" 2>/dev/null || echo "No mod dir"
+            echo "THEOS_ROOTHIDE=$THEOS_ROOTHIDE"
             exit 1
           }
 
