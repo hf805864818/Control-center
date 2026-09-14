@@ -12,7 +12,7 @@ CustomCCBgPrefs_FILES = CCBGRootListController.m \
                         CCBGMediaManager.m \
                         CCBGThumbnailButtonCell.m
 
-CustomCCBgPrefs_CFLAGS = -fobjc-arc -DCC_PACKAGE_VERSION=@\"$(CC_PACKAGE_VERSION)\"
+CustomCCBgPrefs_CFLAGS = -fobjc-arc -DCC_PACKAGE_VERSION=@\"$(CC_PACKAGE_VERSION)\" -Wno-unused-function -Wno-unused-variable
 CustomCCBgPrefs_FRAMEWORKS = UIKit Foundation Photos AVFoundation
 CustomCCBgPrefs_PRIVATE_FRAMEWORKS = Preferences
 CustomCCBgPrefs_INSTALL_PATH = /Library/PreferenceBundles

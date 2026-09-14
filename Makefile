@@ -16,7 +16,7 @@ TWEAK_NAME = CCEnhancer
 
 CCEnhancer_FILES     = Tweak.x \
                        Shared/CCSharedSupport.m
-CCEnhancer_CFLAGS    = -fobjc-arc -DCCENHANCER_DEBUG=$(CCENHANCER_DEBUG) -DCC_PACKAGE_VERSION=@\"$(CC_PACKAGE_VERSION)\"
+CCEnhancer_CFLAGS    = -fobjc-arc -DCCENHANCER_DEBUG=$(CCENHANCER_DEBUG) -DCC_PACKAGE_VERSION=@\"$(CC_PACKAGE_VERSION)\" -Wno-unused-function -Wno-unused-variable
 CCEnhancer_FRAMEWORKS = UIKit QuartzCore AudioToolbox
 
 include $(THEOS)/makefiles/tweak.mk

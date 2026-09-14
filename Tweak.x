@@ -12,6 +12,7 @@
 #define CC_PACKAGE_VERSION @"unknown"
 #endif
 
+__attribute__((unused))
 static NSString *ccGetVersionString(void) {
     static NSString *version = nil;
     static dispatch_once_t onceToken;

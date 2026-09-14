@@ -8,7 +8,7 @@ BUNDLE_NAME = CCSliderPrefs
 CC_PACKAGE_VERSION := $(shell cat ../VERSION 2>/dev/null | tr -d '[:space:]' || sed -n 's/^Version: //p' ../control | head -n 1 | tr -d '[:space:]')
 
 CCSliderPrefs_FILES = CCSliderRootListController.m
-CCSliderPrefs_CFLAGS = -fobjc-arc -DCC_PACKAGE_VERSION=@\"$(CC_PACKAGE_VERSION)\"
+CCSliderPrefs_CFLAGS = -fobjc-arc -DCC_PACKAGE_VERSION=@\"$(CC_PACKAGE_VERSION)\" -Wno-unused-function -Wno-unused-variable
 CCSliderPrefs_FRAMEWORKS = UIKit Foundation
 CCSliderPrefs_PRIVATE_FRAMEWORKS = Preferences
 CCSliderPrefs_INSTALL_PATH = /Library/PreferenceBundles

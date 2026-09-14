@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = CustomCCBg
 
 CustomCCBg_FILES = Tweak.x
-CustomCCBg_CFLAGS = -fobjc-arc
+CustomCCBg_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-unused-variable
 CustomCCBg_FRAMEWORKS = UIKit Foundation AVFoundation AVKit QuartzCore CoreImage
 
 include $(THEOS)/makefiles/tweak.mk
