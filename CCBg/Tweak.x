@@ -2357,8 +2357,7 @@ static volatile BOOL sCCBgInMaterialHook = NO;
     // 直接操作 layer 层级，不触发 setHidden: 的 hook（避免额外布局）
     selfView.layer.opacity = 0.0f;
     selfView.layer.hidden = YES;
-    // 用 %orig 设置 hidden=YES，绕过我们的 setHidden: hook
-    %orig(YES);
+    selfView.hidden = YES; // re-entrancy guard 会阻止 setHidden: hook 做额外工作
     // 隐藏同级的液态玻璃（遍历但不修改布局）
     ccbgHideGlassSiblingsOf(selfView);
     sCCBgInMaterialHook = NO;
@@ -2436,7 +2435,7 @@ static volatile BOOL sCCBgInMaterialHook = NO;
     sCCBgInMaterialHook = YES;
     selfView.layer.opacity = 0.0f;
     selfView.layer.hidden = YES;
-    %orig(YES);
+    selfView.hidden = YES; // re-entrancy guard 会阻止 setHidden: hook 做额外工作
     ccbgHideGlassSiblingsOf(selfView);
     sCCBgInMaterialHook = NO;
 }
