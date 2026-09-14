@@ -17,6 +17,16 @@
 #import <objc/runtime.h>
 // LGSharedSupport.h not needed - CustomCCBg is self-contained
 
+// 进程检测：仅 SpringBoard 加载
+static BOOL ccbgIsSpringBoard(void) {
+    static BOOL cached = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cached = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
+    });
+    return cached;
+}
+
 // 本地实现：检查视图祖先链中是否包含指定类名的视图
 static BOOL ccbgHasAncestorOfClassName(UIView *v, NSString *clsName) {
     Class cls = NSClassFromString(clsName);
@@ -2321,17 +2331,6 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 // layoutSubviews 中隐藏视图 → 触发 setNeedsLayout → 再次 layoutSubviews → 无限循环 → 手机卡死
 // 用静态标志阻止重入，并延迟视图修改到下一个 runloop
 static volatile BOOL sCCBgInMaterialHook = NO;
-
-// 进程检测：仅 SpringBoard 加载
-// 【修复卡死】放在 %hook 之前，确保在文件作用域
-static BOOL ccbgIsSpringBoard(void) {
-    static BOOL cached = NO;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cached = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
-    });
-    return cached;
-}
 
 %hook MTMaterialView
 
