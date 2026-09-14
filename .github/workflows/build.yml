@@ -1,0 +1,169 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'VERSION'
+      - '*.md'
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: '版本递增类型'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+env:
+  THEOS: /opt/theos
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: 设置 Git 身份
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 设置 Theos 构建环境
+        run: |
+          chmod +x scripts/setup_theos.sh
+          bash scripts/setup_theos.sh
+
+      - name: 验证 Theos 安装
+        run: |
+          echo "THEOS = $THEOS"
+          ls -la "$THEOS/bin/" 2>/dev/null || echo "No bin dir"
+          ls -la "$THEOS/sdks/" 2>/dev/null || echo "No SDKs found"
+          which ldid 2>/dev/null || echo "ldid not found"
+          "$THEOS/bin/dpkg-deb" --version 2>/dev/null || dpkg-deb --version 2>/dev/null || echo "dpkg-deb not found"
+
+      - name: 自动递增版本号
+        id: version
+        run: |
+          chmod +x scripts/bump_version.sh
+          BUMP_TYPE="${{ github.event.inputs.bump_type || 'patch' }}"
+          bash scripts/bump_version.sh "$BUMP_TYPE"
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "新版本号: $VERSION"
+
+      - name: 提交版本号更新
+        run: |
+          git add VERSION control CCToggle/Info.plist CCBgPrefs/Resources/Info.plist CCSliderPrefs/Resources/Info.plist 2>/dev/null || git add -A
+          |
+          if git diff --cached --quiet; then
+            echo "无版本变更需要提交"
+          else
+            git commit -m "chore: 自动递增版本号至 v${{ steps.version.outputs.version }} [skip ci]"
+            git push
+            echo "版本号已提交并推送"
+          fi
+
+      - name: 编译 roothide 版本
+        id: build_roothide
+        run: |
+          echo "=========================================="
+          echo "  编译 roothide 版本..."
+          echo "=========================================="
+          make clean 2>/dev/null || true
+          make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1 2>&1 || {
+            echo "❌ roothide 编译失败"
+            exit 1
+          }
+
+          # 查找 .deb 文件
+          DEB_FILE=$(find packages -name "*.deb" -type f | head -n 1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "❌ 未找到 roothide .deb 文件"
+            exit 1
+          fi
+
+          echo "roothide deb: $DEB_FILE"
+          mkdir -p build_output/roothide
+          cp "$DEB_FILE" "build_output/roothide/CCEnhancer_v${{ steps.version.outputs.version }}_roothide.deb"
+          echo "✓ roothide 编译成功"
+          echo "roothide_path=build_output/roothide/CCEnhancer_v${{ steps.version.outputs.version }}_roothide.deb" >> $GITHUB_OUTPUT
+
+      - name: 编译 rootless 版本
+        id: build_rootless
+        run: |
+          echo "=========================================="
+          echo "  编译 rootless 版本..."
+          echo "=========================================="
+          make clean 2>/dev/null || true
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 2>&1 || {
+            echo "❌ rootless 编译失败"
+            exit 1
+          }
+
+          # 查找 .deb 文件
+          DEB_FILE=$(find packages -name "*.deb" -type f | head -n 1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "❌ 未找到 rootless .deb 文件"
+            exit 1
+          fi
+
+          echo "rootless deb: $DEB_FILE"
+          mkdir -p build_output/rootless
+          cp "$DEB_FILE" "build_output/rootless/CCEnhancer_v${{ steps.version.outputs.version }}_rootless.deb"
+          echo "✓ rootless 编译成功"
+          echo "rootless_path=build_output/rootless/CCEnhancer_v${{ steps.version.outputs.version }}_rootless.deb" >> $GITHUB_OUTPUT
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCEnhancer_v${{ steps.version.outputs.version }}
+          path: build_output/**/*.deb
+          retention-days: 30
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: CCEnhancer v${{ steps.version.outputs.version }}
+          body: |
+            # CCEnhancer v${{ steps.version.outputs.version }}
+
+            ## 下载安装
+
+            | 越狱类型 | 下载文件 |
+            |---------|---------|
+            | roothide | `CCEnhancer_v${{ steps.version.outputs.version }}_roothide.deb` |
+            | rootless | `CCEnhancer_v${{ steps.version.outputs.version }}_rootless.deb` |
+
+            ## 功能
+
+            - 控制中心自定义背景（图片/视频/毛玻璃）
+            - 亮度/音量滑块百分比显示
+            - 百分比文字随机颜色
+            - 滑块触感反馈
+            - 控制中心快捷开关
+
+            ## 安装后配置
+
+            安装后在 **设置** App 中找到「控制中心背景」和「滑块增强」进行配置。
+
+            ---
+            Commit: ${{ github.sha }}
+          files: |
+            build_output/roothide/*.deb
+            build_output/rootless/*.deb
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

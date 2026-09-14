@@ -1,0 +1,17 @@
+{
+    CFBundleDevelopmentRegion = zh_CN;
+    CFBundleExecutable = CCToggle;
+    CFBundleIdentifier = "dylv.ccenhancer.cctoggle";
+    CFBundleInfoDictionaryVersion = "6.0";
+    CFBundleName = "CCEnhancer";
+    CFBundleDisplayName = "CCEnhancer";
+    CFBundlePackageType = BNDL;
+    CFBundleShortVersionString = "1.0";
+    CFBundleSignature = "????";
+    CFBundleVersion = "1.0";
+    NSPrincipalClass = CCToggleModule;
+    "CCUIModuleIdentifier" = "dylv.ccenhancer.cctoggle";
+    "CCUISupportedModuleSizes" = (
+        small
+    );
+}

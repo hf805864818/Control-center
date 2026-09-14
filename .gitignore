@@ -1,0 +1,20 @@
+# Theos build artifacts
+/.theos/
+/obj/
+/packages/
+/.deb/
+/*.deb
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Build output
+/build/
+/output/
