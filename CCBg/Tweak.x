@@ -2349,15 +2349,27 @@ static volatile BOOL sCCBgInMaterialHook = NO;
     }
 
     // 系统想显示时才拦截，系统想隐藏时直接放行
-    if (hidden) { %orig; return; }
+    if (hidden) {
+        %orig;
+        return;
+    }
 
     // 快速退出：功能未启用或控制中心不可见
     CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
-    if (!(mgr.connectEnabled || mgr.mediaEnabled)) { %orig; return; }
-    if (!mgr.isControlCenterVisible) { %orig; return; }
+    if (!(mgr.connectEnabled || mgr.mediaEnabled)) {
+        %orig;
+        return;
+    }
+    if (!mgr.isControlCenterVisible) {
+        %orig;
+        return;
+    }
 
     UIView *selfView = (UIView *)self;
-    if (!ccbgIsInsideManagedModule(selfView)) { %orig; return; }
+    if (!ccbgIsInsideManagedModule(selfView)) {
+        %orig;
+        return;
+    }
 
     // 强制保持隐藏
     sCCBgInMaterialHook = YES;
