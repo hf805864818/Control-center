@@ -91,14 +91,21 @@ install_sdk() {
 
 install_sdk "$THEOS"
 
-# roothide Theos 可能自带 SDK, 如果没有就从标准 Theos 复制
+# roothide Theos 需要 SDK - 确保目录存在然后复制
+mkdir -p "$THEOS_ROOTHIDE/sdks"
 if [ -z "$(ls -A "$THEOS_ROOTHIDE/sdks" 2>/dev/null)" ]; then
     if [ -n "$(ls -A "$THEOS/sdks" 2>/dev/null)" ]; then
         echo "从标准 Theos 复制 SDK 到 roothide Theos..."
-        cp -r "$THEOS/sdks/"* "$THEOS_ROOTHIDE/sdks/" 2>/dev/null || true
+        cp -r "$THEOS/sdks/"* "$THEOS_ROOTHIDE/sdks/"
     else
         install_sdk "$THEOS_ROOTHIDE"
     fi
+fi
+
+# 最终验证: 确保 roothide Theos 有 SDK
+if [ -z "$(ls -A "$THEOS_ROOTHIDE/sdks" 2>/dev/null)" ]; then
+    echo "⚠️ roothide Theos 仍然没有 SDK, 尝试直接下载..."
+    install_sdk "$THEOS_ROOTHIDE"
 fi
 
 # ============================================
