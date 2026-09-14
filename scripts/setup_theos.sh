@@ -9,21 +9,15 @@ set -euo pipefail
 echo "安装构建依赖..."
 sudo apt-get update -qq 2>/dev/null || true
 sudo apt-get install -y -qq \
-    fakeroot \
-    rsync \
-    perl \
-    curl \
-    unzip \
-    dpkg-dev \
-    libtinfo5 \
+    fakeroot rsync perl curl unzip dpkg-dev libtinfo5 \
     2>/dev/null || true
 
 # 安装 ldid
 if ! command -v ldid &> /dev/null; then
     echo "安装 ldid..."
-    curl -L -o /tmp/ldid https://github.com/opa334/ldid/releases/latest/download/ldid_linux_x86_64 2>/dev/null || \
-    curl -L -o /tmp/ldid https://github.com/opa334/ldid/releases/download/v2.1.5-procursus3/ldid_linux_x86_64 2>/dev/null || true
-    if [ -f /tmp/ldid ]; then
+    curl -sL -o /tmp/ldid "https://github.com/opa334/ldid/releases/latest/download/ldid_linux_x86_64" 2>/dev/null || \
+    curl -sL -o /tmp/ldid "https://github.com/opa334/ldid/releases/download/v2.1.5-procursus3/ldid_linux_x86_64" 2>/dev/null || true
+    if [ -f /tmp/ldid ] && [ -s /tmp/ldid ]; then
         chmod +x /tmp/ldid
         sudo mv /tmp/ldid /usr/local/bin/ldid
     fi
@@ -34,7 +28,7 @@ fi
 # ============================================
 export THEOS="${THEOS:-/opt/theos}"
 
-if [ ! -d "$THEOS" ] || [ ! -f "$THEOS/makefiles/common.mk" ]; then
+if [ ! -f "$THEOS/makefiles/common.mk" ]; then
     echo "安装标准 Theos 到 $THEOS ..."
     sudo mkdir -p "$THEOS"
     sudo chown -R "$(whoami)" "$THEOS"
@@ -48,7 +42,7 @@ fi
 # ============================================
 THEOS_ROOTHIDE="/opt/theos-roothide"
 
-if [ ! -d "$THEOS_ROOTHIDE" ] || [ ! -f "$THEOS_ROOTHIDE/makefiles/common.mk" ]; then
+if [ ! -f "$THEOS_ROOTHIDE/makefiles/common.mk" ]; then
     echo "安装 roothide Theos 到 $THEOS_ROOTHIDE ..."
     sudo mkdir -p "$THEOS_ROOTHIDE"
     sudo chown -R "$(whoami)" "$THEOS_ROOTHIDE"
@@ -58,54 +52,77 @@ else
 fi
 
 # ============================================
-# 下载 iOS SDK (两个 Theos 共享)
+# 下载 iOS SDK (只下载一次, 复制到两个 Theos)
 # ============================================
-install_sdk() {
-    local theos_path="$1"
-    if [ -d "$theos_path/sdks" ] && [ -n "$(ls -A "$theos_path/sdks" 2>/dev/null)" ]; then
-        echo "SDK 已存在于 $theos_path/sdks"
+download_sdks() {
+    local target_dir="$1"
+    mkdir -p "$target_dir"
+
+    # 检查是否已有 .sdk 目录
+    local sdk_count=$(find "$target_dir" -maxdepth 1 -name "*.sdk" -type d 2>/dev/null | wc -l)
+    if [ "$sdk_count" -gt 0 ]; then
+        echo "  SDK 已存在 ($sdk_count 个): $(ls "$target_dir" | head -3)"
         return 0
     fi
 
-    mkdir -p "$theos_path/sdks"
+    echo "  下载 iOS SDK 到 $target_dir ..."
 
-    # 尝试从 theos/sdks 仓库下载
-    echo "下载 iOS SDK 到 $theos_path/sdks ..."
-    curl -L -o /tmp/sdks.zip "https://github.com/theos/sdks/archive/refs/heads/master.zip" 2>/dev/null || true
-    if [ -f /tmp/sdks.zip ] && unzip -l /tmp/sdks.zip 2>/dev/null | grep -q ".sdk"; then
+    # 方法1: 从 theos/sdks 仓库下载
+    curl -sL -o /tmp/sdks.zip "https://github.com/theos/sdks/archive/refs/heads/master.zip" 2>/dev/null || true
+    if [ -f /tmp/sdks.zip ] && [ -s /tmp/sdks.zip ]; then
         unzip -q /tmp/sdks.zip -d /tmp/sdks_extracted 2>/dev/null || true
-        cp -r /tmp/sdks_extracted/sdks-master/*.sdk "$theos_path/sdks/" 2>/dev/null || true
-        rm -rf /tmp/sdks_extracted /tmp/sdks.zip
+        if [ -d /tmp/sdks_extracted/sdks-master ]; then
+            cp -r /tmp/sdks_extracted/sdks-master/*.sdk "$target_dir/" 2>/dev/null || true
+            cp -r /tmp/sdks_extracted/sdks-master/*.sdk.* "$target_dir/" 2>/dev/null || true
+            rm -rf /tmp/sdks_extracted
+        fi
+        rm -f /tmp/sdks.zip
     fi
 
-    # 备用源: 直接下载单个 SDK
-    if [ -z "$(ls -A "$theos_path/sdks" 2>/dev/null)" ]; then
-        echo "尝试备用 SDK 源..."
-        curl -L -o /tmp/sdk.tar.xz "https://github.com/theos/sdks/raw/master/iPhoneOS16.5.sdk.tar.xz" 2>/dev/null || true
-        if [ -f /tmp/sdk.tar.xz ]; then
-            tar -xf /tmp/sdk.tar.xz -C "$theos_path/sdks/"
-            rm /tmp/sdk.tar.xz
-        fi
+    # 检查是否成功
+    sdk_count=$(find "$target_dir" -maxdepth 1 -name "*.sdk" -type d 2>/dev/null | wc -l)
+    if [ "$sdk_count" -eq 0 ]; then
+        # 方法2: 直接下载 .tar.xz 格式的 SDK
+        echo "  尝试直接下载 SDK tar.xz ..."
+        for sdk_url in \
+            "https://github.com/theos/sdks/raw/master/iPhoneOS16.5.sdk.tar.xz" \
+            "https://github.com/theos/sdks/raw/master/iPhoneOS15.5.sdk.tar.xz" \
+            "https://github.com/theos/sdks/raw/master/iPhoneOS14.5.sdk.tar.xz"; do
+            echo "  尝试: $sdk_url"
+            curl -sL -o /tmp/sdk.tar.xz "$sdk_url" 2>/dev/null || true
+            if [ -f /tmp/sdk.tar.xz ] && [ -s /tmp/sdk.tar.xz ]; then
+                tar -xf /tmp/sdk.tar.xz -C "$target_dir/" 2>/dev/null && {
+                    rm -f /tmp/sdk.tar.xz
+                    break
+                }
+                rm -f /tmp/sdk.tar.xz
+            fi
+        done
+    fi
+
+    # 最终检查
+    sdk_count=$(find "$target_dir" -maxdepth 1 -name "*.sdk" -type d 2>/dev/null | wc -l)
+    if [ "$sdk_count" -gt 0 ]; then
+        echo "  ✓ SDK 安装成功 ($sdk_count 个)"
+        ls -1 "$target_dir" | head -5
+    else
+        echo "  ✗ SDK 安装失败!"
     fi
 }
 
-install_sdk "$THEOS"
+echo "安装 SDK 到标准 Theos..."
+download_sdks "$THEOS/sdks"
 
-# roothide Theos 需要 SDK - 确保目录存在然后复制
-mkdir -p "$THEOS_ROOTHIDE/sdks"
-if [ -z "$(ls -A "$THEOS_ROOTHIDE/sdks" 2>/dev/null)" ]; then
-    if [ -n "$(ls -A "$THEOS/sdks" 2>/dev/null)" ]; then
-        echo "从标准 Theos 复制 SDK 到 roothide Theos..."
-        cp -r "$THEOS/sdks/"* "$THEOS_ROOTHIDE/sdks/"
-    else
-        install_sdk "$THEOS_ROOTHIDE"
-    fi
-fi
+echo "安装 SDK 到 roothide Theos..."
+download_sdks "$THEOS_ROOTHIDE/sdks"
 
-# 最终验证: 确保 roothide Theos 有 SDK
-if [ -z "$(ls -A "$THEOS_ROOTHIDE/sdks" 2>/dev/null)" ]; then
-    echo "⚠️ roothide Theos 仍然没有 SDK, 尝试直接下载..."
-    install_sdk "$THEOS_ROOTHIDE"
+# 如果 roothide 没有 SDK 但标准有, 复制过去
+roothide_sdk_count=$(find "$THEOS_ROOTHIDE/sdks" -maxdepth 1 -name "*.sdk" -type d 2>/dev/null | wc -l)
+standard_sdk_count=$(find "$THEOS/sdks" -maxdepth 1 -name "*.sdk" -type d 2>/dev/null | wc -l)
+if [ "$roothide_sdk_count" -eq 0 ] && [ "$standard_sdk_count" -gt 0 ]; then
+    echo "从标准 Theos 复制 SDK 到 roothide Theos..."
+    cp -r "$THEOS/sdks/"*.sdk "$THEOS_ROOTHIDE/sdks/"
+    roothide_sdk_count=$(find "$THEOS_ROOTHIDE/sdks" -maxdepth 1 -name "*.sdk" -type d 2>/dev/null | wc -l)
 fi
 
 # ============================================
@@ -116,12 +133,12 @@ echo "===== Theos 安装验证 ====="
 echo "标准 Theos (rootless):"
 echo "  路径: $THEOS"
 echo "  ldid: $(command -v ldid 2>/dev/null || echo 'not found')"
-echo "  SDKs:"
+echo "  SDK 数量: $standard_sdk_count"
 ls -1 "$THEOS/sdks/" 2>/dev/null || echo "  (无 SDK)"
 
 echo ""
 echo "roothide Theos:"
 echo "  路径: $THEOS_ROOTHIDE"
-echo "  SDKs:"
+echo "  SDK 数量: $roothide_sdk_count"
 ls -1 "$THEOS_ROOTHIDE/sdks/" 2>/dev/null || echo "  (无 SDK)"
 echo ""
