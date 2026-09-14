@@ -188,8 +188,10 @@ static void ccbgHideGlassSiblingsOf(UIView *materialView) {
 // 自定义背景在模块视图下方，隐藏 MTMaterialView 后仍然可见
 // 模块内容（图标/文字）在 MTMaterialView 上方，也不受影响
 // 【修复问题2&3】同时隐藏同级的 LGLiveBackdropView 液态玻璃
-static void ccbgHideMaterialBlurInModule(UIView *view) {
-    if (!view) return;
+// 【修复卡死】添加 maxDepth 参数限制递归深度
+// 原 ccbgHideMaterialBlurInModule 无深度限制，遇到极深视图树会递归过深
+static void ccbgHideMaterialBlurInModuleImpl(UIView *view, NSInteger depth) {
+    if (!view || depth > 15) return; // 15 层足够覆盖任何模块视图
     NSString *className = NSStringFromClass([view class]);
     if ([className containsString:@"MTMaterialView"]) {
         // 直接隐藏，三重保障
@@ -201,8 +203,12 @@ static void ccbgHideMaterialBlurInModule(UIView *view) {
         return; // MTMaterialView 内部不需要继续递归
     }
     for (UIView *subview in view.subviews) {
-        ccbgHideMaterialBlurInModule(subview);
+        ccbgHideMaterialBlurInModuleImpl(subview, depth + 1);
     }
+}
+
+static void ccbgHideMaterialBlurInModule(UIView *view) {
+    ccbgHideMaterialBlurInModuleImpl(view, 0);
 }
 
 // 延迟重新隐藏模块内 MTMaterialView
@@ -481,9 +487,18 @@ static void ccbgDumpSubviewTree(UIView *view, NSString *indent, NSMutableString 
     }
 }
 
+// 【修复卡死】模块类型检测缓存 — 同一个视图指针只做一次完整检测
+// 避免每次 viewDidLayoutSubviews / setHidden: 都做 6 层递归关键词扫描
+static const void *kCCBgConnectCacheKey = &kCCBgConnectCacheKey;
+static const void *kCCBgMediaCacheKey = &kCCBgMediaCacheKey;
+
 // 判断是否为连接模块（优先通过模块标识符，其次递归检查子视图类名）
 static BOOL ccbgIsConnectModule(UIView *view) {
     if (!view) return NO;
+    // 缓存命中：之前检测过的视图直接返回结果
+    NSNumber *cached = objc_getAssociatedObject(view, kCCBgConnectCacheKey);
+    if (cached) return [cached boolValue];
+
     NSArray *keywords = ccbgConnectModuleKeywords();
     NSArray *excludeKeywords = ccbgConnectModuleExcludeKeywords();
 
@@ -520,12 +535,18 @@ static BOOL ccbgIsConnectModule(UIView *view) {
         }
     }
     // 递归检查子视图（最多 6 层）—— iOS 17 模块容器类名相同，内容视图在子视图中
-    return ccbgCheckViewTreeForKeywords(view, keywords, 6, excludeKeywords);
+    BOOL result = ccbgCheckViewTreeForKeywords(view, keywords, 6, excludeKeywords);
+    objc_setAssociatedObject(view, kCCBgConnectCacheKey, @(result), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return result;
 }
 
 // 判断是否为播放控制模块（优先通过模块标识符，其次递归检查子视图类名）
 static BOOL ccbgIsMediaModule(UIView *view) {
     if (!view) return NO;
+    // 缓存命中
+    NSNumber *cached = objc_getAssociatedObject(view, kCCBgMediaCacheKey);
+    if (cached) return [cached boolValue];
+
     NSArray *keywords = ccbgMediaModuleKeywords();
     NSArray *excludeKeywords = ccbgMediaModuleExcludeKeywords();
 
@@ -562,7 +583,9 @@ static BOOL ccbgIsMediaModule(UIView *view) {
         }
     }
     // 递归检查子视图（最多 6 层）
-    return ccbgCheckViewTreeForKeywords(view, keywords, 6, excludeKeywords);
+    BOOL result = ccbgCheckViewTreeForKeywords(view, keywords, 6, excludeKeywords);
+    objc_setAssociatedObject(view, kCCBgMediaCacheKey, @(result), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return result;
 }
 
 // MARK: - 图片预渲染模糊工具
@@ -1443,13 +1466,9 @@ static const NSTimeInterval kCCBgDeferredReleaseDelay = 10.0;
     UIView *materialView = ccbgFindMaterialView(view);
     self.originalMaterialView = materialView;
 
-    // 诊断：dump 控制中心根视图层级（仅首次）
-    static dispatch_once_t dumpOnce;
-    dispatch_once(&dumpOnce, ^{
-        NSMutableString *tree = [NSMutableString string];
-        ccbgDumpSubviewTree(view, @"", tree);
-        ccbg_log(@"CC root view hierarchy:\n%@", tree);
-    });
+    // 【修复卡死】移除 dispatch_once + ccbgDumpSubviewTree — 即使只执行一次
+    // 递归遍历整个控制中心视图树（可能数百个子视图）构建巨大字符串是浪费的
+    // ccbg_log 是 no-op，但字符串构建不是
 
     if (self.fullscreenEnabled) {
         self.bgContainerView = [[UIView alloc] initWithFrame:view.bounds];
@@ -1498,16 +1517,9 @@ static const NSTimeInterval kCCBgDeferredReleaseDelay = 10.0;
         self.originalMaterialView.layer.opacity = 0.0f;
         self.originalMaterialView.layer.hidden = YES;
     }
-    // 延迟再次隐藏，防止系统在布局后重新显示
-    __weak UIView *weakMat = self.originalMaterialView;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIView *mat = weakMat;
-        if (mat) {
-            mat.hidden = YES;
-            mat.layer.opacity = 0.0f;
-            mat.layer.hidden = YES;
-        }
-    });
+    // 【修复卡死】移除 dispatch_after 延迟重新隐藏 — MTMaterialView 的
+    // setHidden: hook 已经会在系统尝试显示时拦截，不需要定时器轮询
+    // 每次 updateBackgroundView 调用都创建 dispatch_after 会在动画期间堆积大量定时器
 
     [self ensureCacheValidForType:kCCBgTypeFullscreen];
 
@@ -1617,33 +1629,15 @@ static const NSTimeInterval kCCBgDeferredReleaseDelay = 10.0;
     }
 
     // 调试日志（按 moduleID 去重，因为所有模块类名相同）
-    NSMutableSet *loggedModules = sCCBgLoggedModules();
-    NSString *clsName = NSStringFromClass([moduleView class]);
-    NSString *moduleID = ccbgGetModuleIdentifier(moduleView);
-    NSString *dedupKey = moduleID ?: clsName;
-    @synchronized(loggedModules) {
-        if (![loggedModules containsObject:dedupKey]) {
-            [loggedModules addObject:dedupKey];
-            ccbg_log(@"module detected: class=%@ isConnect=%d isMedia=%d (connectEnabled=%d mediaEnabled=%d) moduleID=%@ frame=%@",
-                  clsName, isConnect, isMedia, self.connectEnabled, self.mediaEnabled,
-                  moduleID ?: @"nil", NSStringFromCGRect(moduleView.frame));
-            // 查找所有可能的标识信息
-            NSMutableString *identifiers = [NSMutableString string];
-            if (moduleView.accessibilityIdentifier) {
-                [identifiers appendFormat:@"  accessibilityID=%@\n", moduleView.accessibilityIdentifier];
-            }
-            if (moduleView.accessibilityLabel) {
-                [identifiers appendFormat:@"  accessibilityLabel=%@\n", moduleView.accessibilityLabel];
-            }
-            if (moduleView.restorationIdentifier) {
-                [identifiers appendFormat:@"  restorationID=%@\n", moduleView.restorationIdentifier];
-            }
-            if (identifiers.length > 0) {
-                ccbg_log(@"  identifiers:\n%@", identifiers);
-            }
-            NSMutableString *tree = [NSMutableString string];
-            ccbgDumpSubviewTree(moduleView, @"  ", tree);
-            ccbg_log(@"  subtree:\n%@", tree);
+    // 【修复卡死】完全禁用日志分支 — ccbg_log 虽是 no-op，但 ccbgDumpSubviewTree
+    // 仍会递归遍历整个视图树构建巨大字符串，每个新模块首次检测时执行一次
+    // 模块视图树可能包含数十上百个子视图，字符串构建消耗大量 CPU 和内存
+    static NSMutableSet *sLoggedModules = sCCBgLoggedModules();
+    NSString *dedupKey = ccbgGetModuleIdentifier(moduleView) ?: NSStringFromClass([moduleView class]);
+    @synchronized(sLoggedModules) {
+        if (![sLoggedModules containsObject:dedupKey]) {
+            [sLoggedModules addObject:dedupKey];
+            // 不再调用 ccbgDumpSubviewTree — 它递归构建字符串即使 ccbg_log 是 no-op
         }
     }
 
@@ -2139,7 +2133,11 @@ static BOOL ccbgIsInsideManagedModule(UIView *materialView) {
 
     // 快速窗口过滤：不在控制中心窗口内的 MTMaterialView 直接跳过
     // 避免对 Banner/Folder/Widget 等非控制中心的 MTMaterialView 做无谓的层级遍历
-    if (mgr.hostView && materialView.window != mgr.hostView.window) return NO;
+    // 【修复卡死】当 hostView 为 nil 时（控制中心未打开），也提前退出
+    // 此时 materialView.window != nil != mgr.hostView.window(=nil) 会通过
+    // 导致对所有 MTMaterialView 做无效的层级遍历
+    if (!mgr.hostView) return NO;
+    if (materialView.window != mgr.hostView.window) return NO;
 
     // 【修复连接模块模糊】优先检查是否在已追踪的管理模块内
     // handleModuleView: 和 handleExpandedModuleViewController: 已成功检测的模块视图
