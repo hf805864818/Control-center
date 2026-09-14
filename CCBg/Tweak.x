@@ -47,26 +47,10 @@ NSMutableSet *sCCBgLoggedModules(void) {
 }
 
 // 运行时扫描所有包含 "Expanded" 或 "Extension" 的类名（用于发现展开模块的实际类）
+// 【修复卡死】整个函数已禁用 — objc_getClassList 遍历数万个类极其耗时
+// 在控制中心每次出现时调用会导致主线程长时间阻塞
 static void ccbgLogExpandedClasses() {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class *classes = NULL;
-        unsigned int numClasses = objc_getClassList(NULL, 0);
-        if (numClasses > 0) {
-            classes = (Class *)malloc(sizeof(Class) * numClasses);
-            numClasses = objc_getClassList(classes, numClasses);
-            NSMutableArray *expandedClasses = [NSMutableArray array];
-            for (unsigned int i = 0; i < numClasses; i++) {
-                NSString *name = NSStringFromClass(classes[i]);
-                if ([name rangeOfString:@"Expanded" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                    [name rangeOfString:@"Extension" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    [expandedClasses addObject:name];
-                }
-            }
-            ccbg_log(@"runtime classes with Expanded/Extension: %@", expandedClasses);
-            free(classes);
-        }
-    });
+    // no-op: 已禁用，避免 objc_getClassList 性能问题
 }
 
 // Darwin 通知回调 — 设置变更时跨进程通知 SpringBoard 重新加载
@@ -226,10 +210,11 @@ static void ccbgHideMaterialBlurInModule(UIView *view) {
 static void ccbgScheduleMaterialBlurClamp(UIView *moduleView) {
     if (!moduleView) return;
     __weak UIView *weakModule = moduleView;
-    // 【修复连接模块模糊】增加更多重隐藏时间点
-    // 覆盖系统在模块动画/布局后重新显示 MTMaterialView 的更长时间窗口
-    CGFloat delays[] = {0.05, 0.15, 0.3, 0.5, 1.0, 2.0};
-    for (int i = 0; i < 6; i++) {
+    // 【修复卡死】从 6 次 dispatch_after 减少到 2 次
+    // 之前 6 次 (0.05, 0.15, 0.3, 0.5, 1.0, 2.0) 会在多模块场景下产生大量定时器
+    // 2 次 (0.1, 0.5) 足够覆盖系统动画完成后的重显示
+    CGFloat delays[] = {0.1, 0.5};
+    for (int i = 0; i < 2; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delays[i] * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             UIView *m = weakModule;
@@ -2338,30 +2323,10 @@ static volatile BOOL sCCBgInMaterialHook = NO;
 %hook MTMaterialView
 
 // 系统布局完成后立即检查并隐藏
-- (void)layoutSubviews {
-    %orig;
-
-    // 重入保护：如果已经在处理中，直接返回，避免死循环
-    if (sCCBgInMaterialHook) return;
-
-    // 快速检查：功能未启用或控制中心不可见时，不做任何检查
-    CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
-    if (!(mgr.connectEnabled || mgr.mediaEnabled)) return;
-    if (!mgr.isControlCenterVisible) return;
-
-    UIView *selfView = (UIView *)self;
-    if (!ccbgIsInsideManagedModule(selfView)) return;
-
-    // 设置重入标志，防止隐藏操作触发的 layoutSubviews 再次进入
-    sCCBgInMaterialHook = YES;
-    // 直接操作 layer 层级，不触发 setHidden: 的 hook（避免额外布局）
-    selfView.layer.opacity = 0.0f;
-    selfView.layer.hidden = YES;
-    selfView.hidden = YES; // re-entrancy guard 会阻止 setHidden: hook 做额外工作
-    // 隐藏同级的液态玻璃（遍历但不修改布局）
-    ccbgHideGlassSiblingsOf(selfView);
-    sCCBgInMaterialHook = NO;
-}
+// 【修复卡死】完全移除 layoutSubviews hook — 这是最危险的 hook
+// layoutSubviews 被系统高频调用，每次隐藏视图 → setNeedsLayout → 再次 layoutSubviews
+// 即使有重入保护，大量的 MTMaterialView 实例仍会导致性能问题
+// 模糊隐藏改由 setHidden: 和 didMoveToWindow 两个 hook 覆盖
 
 // 拦截系统尝试显示 MTMaterialView 的操作
 - (void)setHidden:(BOOL)hidden {
@@ -2371,51 +2336,28 @@ static volatile BOOL sCCBgInMaterialHook = NO;
         return;
     }
 
-    UIView *selfView = (UIView *)self;
-    // 如果系统试图显示（hidden=NO），且该 MTMaterialView 在管理模块内，强制保持隐藏
-    if (!hidden) {
-        CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
-        if ((mgr.connectEnabled || mgr.mediaEnabled) &&
-            mgr.isControlCenterVisible &&
-            ccbgIsInsideManagedModule(selfView)) {
-            // 调用原始实现设置 hidden=YES，绕过我们的 hook 避免递归
-            sCCBgInMaterialHook = YES;
-            %orig(YES);
-            selfView.layer.opacity = 0.0f;
-            selfView.layer.hidden = YES;
-            ccbgHideGlassSiblingsOf(selfView);
-            sCCBgInMaterialHook = NO;
-            return;
-        }
-    }
-    %orig;
-}
+    // 系统想显示时才拦截，系统想隐藏时直接放行
+    if (hidden) { %orig; return; }
 
-// 拦截系统通过 alpha 属性显示 MTMaterialView 的操作
-- (void)setAlpha:(CGFloat)alpha {
-    // 重入保护
-    if (sCCBgInMaterialHook) {
-        %orig;
-        return;
-    }
+    // 快速退出：功能未启用或控制中心不可见
+    CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
+    if (!(mgr.connectEnabled || mgr.mediaEnabled)) { %orig; return; }
+    if (!mgr.isControlCenterVisible) { %orig; return; }
 
     UIView *selfView = (UIView *)self;
-    if (alpha > 0.01) {
-        CustomCCBgManager *mgr = [CustomCCBgManager sharedInstance];
-        if ((mgr.connectEnabled || mgr.mediaEnabled) &&
-            mgr.isControlCenterVisible &&
-            ccbgIsInsideManagedModule(selfView)) {
-            sCCBgInMaterialHook = YES;
-            %orig(0.0f);
-            selfView.layer.opacity = 0.0f;
-            selfView.layer.hidden = YES;
-            ccbgHideGlassSiblingsOf(selfView);
-            sCCBgInMaterialHook = NO;
-            return;
-        }
-    }
-    %orig;
+    if (!ccbgIsInsideManagedModule(selfView)) { %orig; return; }
+
+    // 强制保持隐藏
+    sCCBgInMaterialHook = YES;
+    %orig(YES);
+    selfView.layer.opacity = 0.0f;
+    selfView.layer.hidden = YES;
+    ccbgHideGlassSiblingsOf(selfView);
+    sCCBgInMaterialHook = NO;
 }
+
+// 【修复卡死】完全移除 setAlpha: hook — 系统极少通过 alpha 显示 MTMaterialView
+// 移除此 hook 可减少不必要的调用开销
 
 // MTMaterialView 被添加到窗口时检查
 - (void)didMoveToWindow {
@@ -2435,7 +2377,7 @@ static volatile BOOL sCCBgInMaterialHook = NO;
     sCCBgInMaterialHook = YES;
     selfView.layer.opacity = 0.0f;
     selfView.layer.hidden = YES;
-    selfView.hidden = YES; // re-entrancy guard 会阻止 setHidden: hook 做额外工作
+    selfView.hidden = YES;
     ccbgHideGlassSiblingsOf(selfView);
     sCCBgInMaterialHook = NO;
 }
@@ -2444,7 +2386,21 @@ static volatile BOOL sCCBgInMaterialHook = NO;
 
 // MARK: - 构造函数
 
+// 进程检测：仅 SpringBoard 加载
+static BOOL ccbgIsSpringBoard(void) {
+    static BOOL cached = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cached = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
+    });
+    return cached;
+}
+
 %ctor {
+    // 【修复卡死】仅 SpringBoard 进程中初始化 hooks
+    // 虽然 plist 过滤器应该限制加载范围，但作为额外保护
+    if (!ccbgIsSpringBoard()) return;
+
     // 初始化所有 hook
     %init;
 
