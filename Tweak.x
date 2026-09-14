@@ -320,7 +320,7 @@ static void ccSliderStopDisplayLink(UIView *slider) {
     // 【修复卡死】触摸结束后立即停止 DisplayLink，避免持续消耗 CPU
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                     dispatch_get_main_queue(), ^{
-        if (![(UIView *)self isTracking]) {
+        if (![(UIControl *)self isTracking]) {
             ccSliderStopDisplayLink((UIView *)self);
         }
     });
@@ -373,7 +373,7 @@ static void ccSliderStopDisplayLink(UIView *slider) {
         // 【修复卡死】延迟停止，避免持续运行
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                         dispatch_get_main_queue(), ^{
-            if (![(UIView *)self isTracking]) {
+            if (![(UIControl *)self isTracking]) {
                 ccSliderStopDisplayLink((UIView *)self);
             }
         });
