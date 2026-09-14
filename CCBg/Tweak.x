@@ -1632,7 +1632,11 @@ static const NSTimeInterval kCCBgDeferredReleaseDelay = 10.0;
     // 【修复卡死】完全禁用日志分支 — ccbg_log 虽是 no-op，但 ccbgDumpSubviewTree
     // 仍会递归遍历整个视图树构建巨大字符串，每个新模块首次检测时执行一次
     // 模块视图树可能包含数十上百个子视图，字符串构建消耗大量 CPU 和内存
-    static NSMutableSet *sLoggedModules = sCCBgLoggedModules();
+    static NSMutableSet *sLoggedModules = nil;
+    static dispatch_once_t sOnceToken;
+    dispatch_once(&sOnceToken, ^{
+        sLoggedModules = sCCBgLoggedModules();
+    });
     NSString *dedupKey = ccbgGetModuleIdentifier(moduleView) ?: NSStringFromClass([moduleView class]);
     @synchronized(sLoggedModules) {
         if (![sLoggedModules containsObject:dedupKey]) {
