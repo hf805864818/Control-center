@@ -6,4 +6,4 @@ Description: 液态控制中心增强：自定义背景 + 亮度/音量百分比
 Maintainer: hf805864818
 Author: hf805864818
 Section: Tweaks
-Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0), firmware (<< 27.0), preferenceloader (>= 2.3.3)
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0), firmware (<< 27.0), preferenceloader
