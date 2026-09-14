@@ -2707,24 +2707,23 @@ static void ccbgMarkBootSuccessful(void) {
         return;
     }
 
-    // 【安全机制 2】检测 boot loop
+    // 【安全机制 2】检测 boot loop（在 %init 之前检测，设置安全模式标志）
     if (ccbgIsInBootLoop()) {
         // 检测到 boot loop，进入安全模式
-        // 仍然初始化 hooks，但所有功能都被禁用
         sCCBgSafeMode = YES;
         
         // 创建一个标记文件，让用户知道发生了什么
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *safemodeFile = @"/var/mobile/Library/Preferences/dylv.Deepliquid.ccbg/.safemode";
         [fm createFileAtPath:safemodeFile contents:nil attributes:nil];
-        
-        // 初始化 hooks（但功能全部被禁用）
-        %init;
-        return;
     }
 
-    // 正常启动：初始化所有 hook
+    // 初始化所有 hook（%init 只能调用一次）
+    // 安全模式下 hooks 仍然加载，但所有功能通过 sCCBgSafeMode 标志跳过
     %init;
+
+    // 安全模式下不初始化 CustomCCBgManager，节省资源
+    if (sCCBgSafeMode) return;
 
     // 延迟初始化 CustomCCBgManager（等 SpringBoard 启动完成后）
     // 避免在启动关键路径上消耗资源

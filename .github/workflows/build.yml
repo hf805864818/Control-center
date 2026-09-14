@@ -138,6 +138,40 @@ jobs:
           path: build_output/**/*.deb
           retention-days: 30
 
+      - name: 生成更新日志
+        id: changelog
+        run: |
+          # 获取上一个 tag 的名称
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -n "$PREV_TAG" ]; then
+            echo "上一个版本: $PREV_TAG"
+            # 提取两个 tag 之间的 commit 信息
+            CHANGELOG=$(git log "$PREV_TAG..HEAD" --pretty=format:"- %s" --reverse 2>/dev/null || echo "")
+          else
+            echo "没有找到上一个版本，使用最近的 commit"
+            CHANGELOG=$(git log --pretty=format:"- %s" -n 10 --reverse 2>/dev/null || echo "")
+          fi
+          
+          # 如果 changelog 为空，给个默认值
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="- 常规更新和优化"
+          fi
+          
+          echo "--- 更新日志 ---"
+          echo "$CHANGELOG"
+          echo "--- 结束 ---"
+          
+          # 写入文件，避免多行字符串传递问题
+          echo "$CHANGELOG" > /tmp/changelog.txt
+          
+          # 用 GITHUB_OUTPUT 输出
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            echo "$CHANGELOG"
+            echo "CHANGELOG_EOF"
+          } >> $GITHUB_OUTPUT
+
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -146,14 +180,18 @@ jobs:
           body: |
             # CCEnhancer v${{ steps.version.outputs.version }}
 
-            ## 下载安装
+            ## 📥 下载安装
 
             | 越狱类型 | 下载文件 |
             |---------|---------|
             | roothide | `CCEnhancer_v${{ steps.version.outputs.version }}_roothide.deb` |
             | rootless | `CCEnhancer_v${{ steps.version.outputs.version }}_rootless.deb` |
 
-            ## 功能
+            ## 📝 更新内容
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## ✨ 功能特性
 
             - 控制中心自定义背景（图片/视频/毛玻璃）
             - 亮度/音量滑块百分比显示
@@ -161,7 +199,7 @@ jobs:
             - 滑块触感反馈
             - 控制中心快捷开关
 
-            ## 安装后配置
+            ## ⚙️ 安装后配置
 
             安装后在 **设置** App 中找到「控制中心背景」和「滑块增强」进行配置。
 
