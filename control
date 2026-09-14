@@ -1,6 +1,6 @@
 Package: dylv.ccenhancer
 Name: CCEnhancer
-Version: 1.0.9
+Version: 1.0.10
 Architecture: iphoneos-arm64
 Description: 液态控制中心增强：自定义背景 + 亮度/音量百分比 + 随机颜色 + 触感反馈
 Maintainer: hf805864818
