@@ -2637,7 +2637,10 @@ static BOOL ccbgIsInBootLoop(void) {
         NSMutableArray<NSNumber *> *bootTimes = [NSMutableArray array];
         NSData *data = [NSData dataWithContentsOfFile:kCCBgBootLogFile];
         if (data && data.length > 0) {
-            NSArray *loaded = [NSKeyedUnarchiver unarchiveObjectWithData:data];
+            NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:NULL];
+            [unarchiver setRequiresSecureCoding:NO];
+            NSArray *loaded = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
+            [unarchiver finishDecoding];
             if ([loaded isKindOfClass:[NSArray class]]) {
                 for (id obj in loaded) {
                     if ([obj isKindOfClass:[NSNumber class]]) {
@@ -2670,7 +2673,7 @@ static BOOL ccbgIsInBootLoop(void) {
         }
         
         // 写回日志
-        NSData *newData = [NSKeyedArchiver archivedDataWithRootObject:bootTimes];
+        NSData *newData = [NSKeyedArchiver archivedDataWithRootObject:bootTimes requiringSecureCoding:NO error:NULL];
         [newData writeToFile:kCCBgBootLogFile atomically:YES];
         
         // 如果连续快速启动次数超过阈值，判定为 boot loop
@@ -2686,7 +2689,7 @@ static void ccbgMarkBootSuccessful(void) {
         [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
         
         // 清空启动日志，表示启动成功
-        NSData *emptyData = [NSKeyedArchiver archivedDataWithRootObject:@[]];
+        NSData *emptyData = [NSKeyedArchiver archivedDataWithRootObject:@[] requiringSecureCoding:NO error:NULL];
         [emptyData writeToFile:kCCBgBootLogFile atomically:YES];
     }
 }
